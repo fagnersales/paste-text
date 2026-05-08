@@ -25,6 +25,26 @@
   }
   header button.ghost { background: #2a2a2f; }
   header button:disabled { opacity: .5; cursor: not-allowed; }
+  .split { position: relative; display: inline-flex; }
+  .split > button:first-child { border-radius: 6px 0 0 6px; }
+  .split > button.caret {
+    background: #1d4fd8; color: #fff; border: 0; border-left: 1px solid rgba(255,255,255,.25);
+    border-radius: 0 6px 6px 0; padding: 7px 8px; cursor: pointer;
+  }
+  .split > button.caret.ghost { background: #232328; border-left-color: rgba(255,255,255,.08); }
+  .menu {
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 10;
+    background: #1d1d22; border: 1px solid #2a2a2f; border-radius: 8px;
+    min-width: 200px; padding: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  }
+  .menu[hidden] { display: none; }
+  .menu button {
+    display: flex; justify-content: space-between; gap: 12px;
+    width: 100%; text-align: left; background: transparent; color: #eee;
+    border: 0; padding: 7px 10px; border-radius: 4px; cursor: pointer; font: inherit;
+  }
+  .menu button:hover { background: #2a2a2f; }
+  .menu .sub { color: #8b8b94; font-size: 12px; }
   .stage {
     position: relative; overflow: auto; padding: 24px;
     background:
@@ -65,8 +85,16 @@
         <option>Courier New</option>
       </select>
     </label>
-    <button id="copy" disabled>Copy Image</button>
-    <button id="download" disabled>Download PNG</button>
+    <div class="split">
+      <button id="copy" disabled>Copy Image</button>
+      <button id="copyCaret" class="caret" disabled aria-label="Copy variants">▾</button>
+      <div class="menu" id="copyMenu" hidden></div>
+    </div>
+    <div class="split">
+      <button id="download" disabled>Download PNG</button>
+      <button id="downloadCaret" class="caret" disabled aria-label="Download variants">▾</button>
+      <div class="menu" id="downloadMenu" hidden></div>
+    </div>
     <button id="reset" class="ghost" disabled>Reset</button>
   </header>
   <div class="stage" id="stage">
@@ -89,7 +117,11 @@
   const $strokeW = document.getElementById('strokeW');
   const $font = document.getElementById('font');
   const $dl = document.getElementById('download');
+  const $dlCaret = document.getElementById('downloadCaret');
+  const $dlMenu = document.getElementById('downloadMenu');
   const $copy = document.getElementById('copy');
+  const $copyCaret = document.getElementById('copyCaret');
+  const $copyMenu = document.getElementById('copyMenu');
   const $reset = document.getElementById('reset');
 
   let img = null;
@@ -107,7 +139,9 @@
     posPx = { x: cv.width / 2, y: cv.height * 0.9 };
     hint.style.display = 'none';
     $dl.disabled = false;
+    $dlCaret.disabled = false;
     $copy.disabled = false;
+    $copyCaret.disabled = false;
     $reset.disabled = false;
     fitCanvasDisplay();
     draw();
@@ -215,30 +249,121 @@
     el.addEventListener('change', draw);
   }
 
-  $dl.addEventListener('click', () => {
-    if (!img) return;
-    cv.toBlob((blob) => {
+  // Variants: { label, mode: 'original'|'fit'|'square', size? }
+  const VARIANTS = [
+    { label: 'Original',          mode: 'original' },
+    { label: 'Fit 1024px',        mode: 'fit', size: 1024, sub: 'longest edge' },
+    { label: 'Fit 512px',         mode: 'fit', size: 512,  sub: 'longest edge' },
+    { label: 'Fit 256px',         mode: 'fit', size: 256,  sub: 'longest edge' },
+    { label: 'Sticker 512²',      mode: 'square', size: 512, sub: 'WhatsApp / Telegram' },
+    { label: 'Sticker 320²',      mode: 'square', size: 320, sub: 'Discord' },
+    { label: 'Emoji 128²',        mode: 'square', size: 128, sub: 'Slack' },
+  ];
+
+  function renderToCanvas(opts) {
+    const off = document.createElement('canvas');
+    const sw = cv.width, sh = cv.height;
+    let dw, dh, ix, iy, iw, ih;
+    if (opts.mode === 'original') {
+      dw = sw; dh = sh; ix = 0; iy = 0; iw = sw; ih = sh;
+    } else if (opts.mode === 'fit') {
+      const N = opts.size;
+      if (sw >= sh) { dw = N; dh = Math.max(1, Math.round(N * sh / sw)); }
+      else          { dh = N; dw = Math.max(1, Math.round(N * sw / sh)); }
+      ix = 0; iy = 0; iw = dw; ih = dh;
+    } else if (opts.mode === 'square') {
+      const N = opts.size;
+      dw = N; dh = N;
+      if (sw >= sh) { iw = N; ih = Math.round(N * sh / sw); ix = 0; iy = Math.round((N - ih) / 2); }
+      else          { ih = N; iw = Math.round(N * sw / sh); iy = 0; ix = Math.round((N - iw) / 2); }
+    }
+    off.width = dw; off.height = dh;
+    const oc = off.getContext('2d');
+    oc.imageSmoothingEnabled = true;
+    oc.imageSmoothingQuality = 'high';
+    oc.drawImage(img, ix, iy, iw, ih);
+    const text = $text.value;
+    if (text) {
+      const scale = iw / sw;
+      const tx = ix + (posPx.x / sw) * iw;
+      const ty = iy + (posPx.y / sh) * ih;
+      const size = (+$size.value || 48) * scale;
+      const stroke = (+$strokeW.value || 0) * scale;
+      oc.font = `bold ${size}px "${$font.value}", sans-serif`;
+      oc.textAlign = 'center';
+      oc.textBaseline = 'middle';
+      oc.lineJoin = 'round';
+      oc.miterLimit = 2;
+      if (stroke > 0) {
+        oc.lineWidth = stroke * 2;
+        oc.strokeStyle = $stroke.value;
+        oc.strokeText(text, tx, ty);
+      }
+      oc.fillStyle = $color.value;
+      oc.fillText(text, tx, ty);
+    }
+    return off;
+  }
+
+  function renderToBlob(opts) {
+    return new Promise((res) => renderToCanvas(opts).toBlob(res, 'image/png'));
+  }
+
+  function variantLabel(v) {
+    return v.mode === 'original' ? 'caption' : `caption-${v.mode === 'square' ? v.size + 'sq' : v.size}`;
+  }
+
+  async function doDownload(v) {
+    const canvas = renderToCanvas(v);
+    canvas.toBlob((blob) => {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'caption.png';
+      a.download = `${variantLabel(v)}.png`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }, 'image/png');
-  });
+  }
 
-  $copy.addEventListener('click', async () => {
-    if (!img) return;
-    const orig = $copy.textContent;
+  async function doCopy(v, btn) {
+    const orig = btn.textContent;
     try {
-      const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+      const blob = await renderToBlob(v);
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      $copy.textContent = 'Copied!';
+      btn.textContent = 'Copied!';
     } catch (err) {
       console.error(err);
-      $copy.textContent = 'Copy failed';
+      btn.textContent = 'Copy failed';
     }
-    setTimeout(() => { $copy.textContent = orig; }, 1200);
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  }
+
+  function buildMenu(menuEl, onPick) {
+    menuEl.innerHTML = '';
+    for (const v of VARIANTS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = `<span>${v.label}</span>${v.sub ? `<span class="sub">${v.sub}</span>` : ''}`;
+      b.addEventListener('click', () => { menuEl.hidden = true; onPick(v); });
+      menuEl.appendChild(b);
+    }
+  }
+  buildMenu($dlMenu, (v) => doDownload(v));
+  buildMenu($copyMenu, (v) => doCopy(v, $copy));
+
+  function toggleMenu(menu, others) {
+    others.forEach((m) => { m.hidden = true; });
+    menu.hidden = !menu.hidden;
+  }
+  $dlCaret.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($dlMenu, [$copyMenu]); });
+  $copyCaret.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($copyMenu, [$dlMenu]); });
+  document.addEventListener('click', () => { $dlMenu.hidden = true; $copyMenu.hidden = true; });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { $dlMenu.hidden = true; $copyMenu.hidden = true; }
   });
+
+  // main button = default action (Original)
+  $dl.addEventListener('click', () => { if (img) doDownload(VARIANTS[0]); });
+  $copy.addEventListener('click', () => { if (img) doCopy(VARIANTS[0], $copy); });
 
   $reset.addEventListener('click', () => {
     if (!img) return;
