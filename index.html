@@ -24,7 +24,9 @@
     cursor: pointer; font: inherit;
   }
   header button.ghost { background: #2a2a2f; }
+  header button.accent { background: #15803d; }
   header button:disabled { opacity: .5; cursor: not-allowed; }
+  .sep { width: 1px; height: 24px; background: #2a2a2f; margin: 0 4px; }
   .split { position: relative; display: inline-flex; }
   .split > button:first-child { border-radius: 6px 0 0 6px; }
   .split > button.caret {
@@ -72,7 +74,7 @@
 <body>
 <div class="app">
   <header>
-    <input id="text" type="text" placeholder="Type caption here…" />
+    <input id="text" type="text" placeholder="Add or paste images first…" disabled />
     <label>Size <input id="size" type="number" min="8" max="400" value="48" style="width:72px" /></label>
     <label>Color <input id="color" type="color" value="#ffffff" /></label>
     <label>Stroke <input id="stroke" type="color" value="#000000" /></label>
@@ -87,6 +89,16 @@
         <option>Courier New</option>
       </select>
     </label>
+    <button id="addText" class="accent" disabled>+ Text</button>
+    <button id="removeLayer" class="ghost" disabled>Remove Text</button>
+    <span class="sep"></span>
+    <label>Layout
+      <select id="template" style="min-width:160px"><option value="auto">Auto</option></select>
+    </label>
+    <label>Cols <input id="cols" type="number" min="0" max="12" value="0" style="width:56px" title="0 = auto (Auto layout only)" /></label>
+    <label>Gap <input id="gap" type="number" min="0" max="200" value="8" style="width:64px" /></label>
+    <label>BG <input id="bg" type="color" value="#000000" /></label>
+    <span class="sep"></span>
     <div class="split">
       <button id="copy" disabled>Copy Image</button>
       <button id="copyCaret" class="caret" disabled aria-label="Copy variants">▾</button>
@@ -102,7 +114,7 @@
   <div class="stage" id="stage">
     <div class="canvas-wrap" id="wrap">
       <canvas id="cv" width="900" height="500"></canvas>
-      <div class="hint" id="hint">Press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste an image</div>
+      <div class="hint" id="hint">Press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste images</div>
     </div>
   </div>
 </div>
@@ -118,6 +130,12 @@
   const $stroke = document.getElementById('stroke');
   const $strokeW = document.getElementById('strokeW');
   const $font = document.getElementById('font');
+  const $addText = document.getElementById('addText');
+  const $removeLayer = document.getElementById('removeLayer');
+  const $template = document.getElementById('template');
+  const $cols = document.getElementById('cols');
+  const $gap = document.getElementById('gap');
+  const $bg = document.getElementById('bg');
   const $dl = document.getElementById('download');
   const $dlCaret = document.getElementById('downloadCaret');
   const $dlMenu = document.getElementById('downloadMenu');
@@ -126,31 +144,111 @@
   const $copyMenu = document.getElementById('copyMenu');
   const $reset = document.getElementById('reset');
 
-  let img = null;
-  // text position in image-pixel coords (center of text)
-  let pos = { x: 0.5, y: 0.9 }; // normalized 0..1 until image set; replaced with px after
-  let posPx = null;
+  // state
+  const images = []; // [{img}]
+  const layers = []; // [{text,x,y,size,color,stroke,strokeW,font}] x,y in canvas px
+  let selected = -1; // layer index, -1 = none
+  let layout = []; // [{x,y,w,h}] per image (canvas px)
+
   let dragging = false;
   let dragOff = { x: 0, y: 0 };
 
-  function setImage(image) {
-    img = image;
-    cv.width = image.naturalWidth;
-    cv.height = image.naturalHeight;
-    // place text centered near bottom by default
-    posPx = { x: cv.width / 2, y: cv.height * 0.9 };
-    hint.style.display = 'none';
-    $dl.disabled = false;
-    $dlCaret.disabled = false;
-    $copy.disabled = false;
-    $copyCaret.disabled = false;
-    $reset.disabled = false;
+  // ---------- templates ----------
+  function gridSlots(c, r) {
+    const out = [];
+    for (let row = 0; row < r; row++)
+      for (let col = 0; col < c; col++) out.push({ col, row });
+    return out;
+  }
+  function templatesFor(n) {
+    const list = [{ id: 'auto', label: 'Auto' }];
+    if (n >= 2) {
+      list.push({ id: 'stack', label: `Stack (1×${n})`, cols: 1, rows: n, slots: Array.from({length:n},(_,i)=>({col:0,row:i})) });
+      list.push({ id: 'row',   label: `Row (${n}×1)`,  cols: n, rows: 1, slots: Array.from({length:n},(_,i)=>({col:i,row:0})) });
+    }
+    if (n === 3) {
+      list.push({ id: 'big-top',   label: 'Big top + 2',     cols: 2, rows: 2, slots: [{col:0,row:0,cs:2},{col:0,row:1},{col:1,row:1}] });
+      list.push({ id: 'big-bot',   label: '2 + big bottom',  cols: 2, rows: 2, slots: [{col:0,row:0},{col:1,row:0},{col:0,row:1,cs:2}] });
+      list.push({ id: 'big-left',  label: 'Big left + 2',    cols: 2, rows: 2, slots: [{col:0,row:0,rs:2},{col:1,row:0},{col:1,row:1}] });
+      list.push({ id: 'big-right', label: '2 + big right',   cols: 2, rows: 2, slots: [{col:0,row:0},{col:0,row:1},{col:1,row:0,rs:2}] });
+    }
+    if (n === 4) list.push({ id: 'quad', label: 'Quad (2×2)', cols: 2, rows: 2, slots: gridSlots(2,2) });
+    if (n === 5) list.push({ id: '1+4',  label: '1 top + 4',  cols: 4, rows: 2, slots: [{col:0,row:0,cs:4},{col:0,row:1},{col:1,row:1},{col:2,row:1},{col:3,row:1}] });
+    if (n === 6) {
+      list.push({ id: '3x2', label: '3×2', cols: 3, rows: 2, slots: gridSlots(3,2) });
+      list.push({ id: '2x3', label: '2×3', cols: 2, rows: 3, slots: gridSlots(2,3) });
+    }
+    if (n === 8) list.push({ id: '4x2', label: '4×2', cols: 4, rows: 2, slots: gridSlots(4,2) });
+    if (n === 9) list.push({ id: '3x3', label: '3×3', cols: 3, rows: 3, slots: gridSlots(3,3) });
+    return list;
+  }
+
+  function refreshTemplateOptions() {
+    const n = images.length;
+    const opts = templatesFor(n);
+    const prev = $template.value;
+    $template.innerHTML = '';
+    for (const t of opts) {
+      const o = document.createElement('option');
+      o.value = t.id; o.textContent = t.label;
+      $template.appendChild(o);
+    }
+    $template.value = opts.some(t => t.id === prev) ? prev : 'auto';
+    $cols.disabled = $template.value !== 'auto';
+  }
+
+  function currentTemplate() {
+    const n = images.length;
+    const opts = templatesFor(n);
+    return opts.find(t => t.id === $template.value) || opts[0];
+  }
+
+  // ---------- layout ----------
+  function recomputeLayout() {
+    if (images.length === 0) {
+      const prevW = cv.width, prevH = cv.height;
+      cv.width = 900; cv.height = 500;
+      layout = [];
+      return { prevW, prevH };
+    }
+    const prevW = cv.width, prevH = cv.height;
+    const cellW = Math.max(...images.map(i => i.img.naturalWidth));
+    const cellH = Math.max(...images.map(i => i.img.naturalHeight));
+    const g = Math.max(0, +$gap.value | 0);
+    const t = currentTemplate();
+    let cols, rows, slots;
+    if (t.id === 'auto') {
+      cols = (+$cols.value | 0) || Math.ceil(Math.sqrt(images.length));
+      rows = Math.ceil(images.length / cols);
+      slots = images.map((_, i) => ({ col: i % cols, row: Math.floor(i / cols) }));
+    } else {
+      cols = t.cols; rows = t.rows; slots = t.slots;
+    }
+    cv.width  = cols * cellW + (cols - 1) * g;
+    cv.height = rows * cellH + (rows - 1) * g;
+    layout = slots.slice(0, images.length).map(s => {
+      const cs = s.cs || 1, rs = s.rs || 1;
+      return {
+        x: s.col * (cellW + g),
+        y: s.row * (cellH + g),
+        w: cs * cellW + (cs - 1) * g,
+        h: rs * cellH + (rs - 1) * g,
+      };
+    });
+    return { prevW, prevH };
+  }
+
+  function relayout(scaleLayers = true) {
+    const { prevW, prevH } = recomputeLayout();
+    if (scaleLayers && prevW > 0 && prevH > 0 && (prevW !== cv.width || prevH !== cv.height)) {
+      const sx = cv.width / prevW, sy = cv.height / prevH;
+      for (const L of layers) { L.x *= sx; L.y *= sy; }
+    }
     fitCanvasDisplay();
     draw();
   }
 
   function fitCanvasDisplay() {
-    // limit displayed width to viewport
     const maxW = wrap.parentElement.clientWidth - 48;
     const maxH = wrap.parentElement.clientHeight - 48;
     const ratio = cv.width / cv.height;
@@ -161,62 +259,133 @@
     cv.style.height = h + 'px';
   }
 
-  function draw() {
-    if (!img) {
-      ctx.clearRect(0, 0, cv.width, cv.height);
-      return;
-    }
-    ctx.drawImage(img, 0, 0);
-    const text = $text.value;
-    if (!text) return;
-    const size = +$size.value || 48;
-    const font = $font.value;
-    ctx.font = `bold ${size}px "${font}", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-    ctx.miterLimit = 2;
-    const sw = +$strokeW.value || 0;
-    if (sw > 0) {
-      ctx.lineWidth = sw * 2;
-      ctx.strokeStyle = $stroke.value;
-      ctx.strokeText(text, posPx.x, posPx.y);
-    }
-    ctx.fillStyle = $color.value;
-    ctx.fillText(text, posPx.x, posPx.y);
+  // ---------- drawing ----------
+  function drawCell(c, item, cx, cy, cw, ch) {
+    c.fillStyle = $bg.value;
+    c.fillRect(cx, cy, cw, ch);
+    const ar = item.img.naturalWidth / item.img.naturalHeight;
+    let dw, dh;
+    if (cw / ch > ar) { dh = ch; dw = ch * ar; } else { dw = cw; dh = cw / ar; }
+    const dx = cx + (cw - dw) / 2;
+    const dy = cy + (ch - dh) / 2;
+    c.drawImage(item.img, dx, dy, dw, dh);
   }
 
-  // paste handler
-  window.addEventListener('paste', async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const it of items) {
-      if (it.type.startsWith('image/')) {
-        const file = it.getAsFile();
-        if (!file) continue;
-        const url = URL.createObjectURL(file);
-        const im = new Image();
-        im.onload = () => { setImage(im); URL.revokeObjectURL(url); };
-        im.src = url;
-        e.preventDefault();
-        return;
-      }
+  function drawLayer(c, L) {
+    if (!L.text) return;
+    c.font = `bold ${L.size}px "${L.font}", sans-serif`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.lineJoin = 'round';
+    c.miterLimit = 2;
+    if (L.strokeW > 0) {
+      c.lineWidth = L.strokeW * 2;
+      c.strokeStyle = L.stroke;
+      c.strokeText(L.text, L.x, L.y);
     }
-  });
+    c.fillStyle = L.color;
+    c.fillText(L.text, L.x, L.y);
+  }
 
-  // also accept drag-drop
-  window.addEventListener('dragover', (e) => { e.preventDefault(); });
-  window.addEventListener('drop', (e) => {
-    e.preventDefault();
-    const file = e.dataTransfer?.files?.[0];
+  function composeNative() {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, cv.width);
+    c.height = Math.max(1, cv.height);
+    const cc = c.getContext('2d');
+    cc.fillStyle = $bg.value;
+    cc.fillRect(0, 0, c.width, c.height);
+    for (let i = 0; i < images.length; i++) {
+      const r = layout[i]; if (!r) continue;
+      drawCell(cc, images[i], r.x, r.y, r.w, r.h);
+    }
+    for (const L of layers) drawLayer(cc, L);
+    return c;
+  }
+
+  function layerBBox(L) {
+    ctx.save();
+    ctx.font = `bold ${L.size}px "${L.font}", sans-serif`;
+    const m = ctx.measureText(L.text || ' ');
+    ctx.restore();
+    const w = Math.max(20, m.width);
+    const h = L.size * 1.2;
+    return { x: L.x - w / 2, y: L.y - h / 2, w, h };
+  }
+
+  function draw() {
+    if (images.length === 0) {
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      hint.style.display = '';
+      return;
+    }
+    hint.style.display = 'none';
+    ctx.fillStyle = $bg.value;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    for (let i = 0; i < images.length; i++) {
+      const r = layout[i]; if (!r) continue;
+      drawCell(ctx, images[i], r.x, r.y, r.w, r.h);
+    }
+    for (const L of layers) drawLayer(ctx, L);
+    // selection outline
+    if (selected >= 0 && selected < layers.length) {
+      const b = layerBBox(layers[selected]);
+      ctx.save();
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = Math.max(1, cv.width / 600);
+      ctx.setLineDash([8, 6]);
+      ctx.strokeRect(b.x - 4, b.y - 4, b.w + 8, b.h + 8);
+      ctx.restore();
+    }
+  }
+
+  // ---------- image input ----------
+  function addImage(image) {
+    images.push({ img: image });
+    refreshTemplateOptions();
+    relayout(true);
+    enableButtons();
+  }
+
+  function enableButtons() {
+    const has = images.length > 0;
+    $dl.disabled = !has;
+    $dlCaret.disabled = !has;
+    $copy.disabled = !has;
+    $copyCaret.disabled = !has;
+    $reset.disabled = !has;
+    $addText.disabled = !has;
+  }
+
+  function loadFile(file) {
     if (!file || !file.type.startsWith('image/')) return;
     const url = URL.createObjectURL(file);
     const im = new Image();
-    im.onload = () => { setImage(im); URL.revokeObjectURL(url); };
+    im.onload = () => { addImage(im); URL.revokeObjectURL(url); };
     im.src = url;
+  }
+
+  window.addEventListener('paste', (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    let any = false;
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        const file = it.getAsFile();
+        if (file) { loadFile(file); any = true; }
+      }
+    }
+    if (any) e.preventDefault();
   });
 
-  // mapping screen -> canvas pixels
+  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer?.files;
+    if (!files) return;
+    for (const f of files) loadFile(f);
+  });
+
+  // ---------- pointer ----------
   function toCanvasCoords(clientX, clientY) {
     const r = cv.getBoundingClientRect();
     const x = (clientX - r.left) * (cv.width / r.width);
@@ -224,34 +393,140 @@
     return { x, y };
   }
 
+  function hitLayer(x, y) {
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const b = layerBBox(layers[i]);
+      if (x >= b.x - 4 && x <= b.x + b.w + 4 && y >= b.y - 4 && y <= b.y + b.h + 4) return i;
+    }
+    return -1;
+  }
+
   cv.addEventListener('pointerdown', (e) => {
-    if (!img) return;
+    if (images.length === 0) return;
     cv.setPointerCapture(e.pointerId);
     const p = toCanvasCoords(e.clientX, e.clientY);
-    dragOff.x = posPx.x - p.x;
-    dragOff.y = posPx.y - p.y;
-    dragging = true;
+    const idx = hitLayer(p.x, p.y);
+    setSelected(idx);
+    if (idx >= 0) {
+      const L = layers[idx];
+      dragOff.x = L.x - p.x;
+      dragOff.y = L.y - p.y;
+      dragging = true;
+    }
   });
   cv.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
+    if (images.length === 0) return;
     const p = toCanvasCoords(e.clientX, e.clientY);
-    posPx.x = p.x + dragOff.x;
-    posPx.y = p.y + dragOff.y;
-    draw();
+    if (dragging && selected >= 0) {
+      const L = layers[selected];
+      L.x = p.x + dragOff.x;
+      L.y = p.y + dragOff.y;
+      draw();
+    } else {
+      cv.style.cursor = hitLayer(p.x, p.y) >= 0 ? 'move' : 'default';
+    }
   });
   const endDrag = (e) => { dragging = false; try { cv.releasePointerCapture(e.pointerId); } catch {} };
   cv.addEventListener('pointerup', endDrag);
   cv.addEventListener('pointercancel', endDrag);
 
-  cv.style.cursor = 'move';
-
-  // controls
-  for (const el of [$text, $size, $color, $stroke, $strokeW, $font]) {
-    el.addEventListener('input', draw);
-    el.addEventListener('change', draw);
+  // ---------- selection / controls binding ----------
+  function setSelected(idx) {
+    selected = idx;
+    syncControlsFromLayer();
+    draw();
   }
 
-  // Variants: { label, mode: 'original'|'fit'|'square', size? }
+  function syncControlsFromLayer() {
+    const has = selected >= 0;
+    $text.disabled = !has;
+    $removeLayer.disabled = !has;
+    if (!has) { $text.value = ''; return; }
+    const L = layers[selected];
+    $text.value = L.text;
+    $size.value = L.size;
+    $color.value = L.color;
+    $stroke.value = L.stroke;
+    $strokeW.value = L.strokeW;
+    $font.value = L.font;
+  }
+
+  function currentStyle() {
+    return {
+      size: +$size.value || 48,
+      color: $color.value,
+      stroke: $stroke.value,
+      strokeW: +$strokeW.value || 0,
+      font: $font.value,
+    };
+  }
+
+  function addLayer() {
+    if (images.length === 0) return;
+    const L = { text: 'Caption', x: cv.width / 2, y: cv.height / 2, ...currentStyle() };
+    layers.push(L);
+    selected = layers.length - 1;
+    syncControlsFromLayer();
+    draw();
+    $text.focus();
+    $text.select();
+  }
+
+  function removeSelected() {
+    if (selected < 0) return;
+    layers.splice(selected, 1);
+    selected = layers.length ? Math.min(selected, layers.length - 1) : -1;
+    syncControlsFromLayer();
+    draw();
+  }
+
+  $addText.addEventListener('click', addLayer);
+  $removeLayer.addEventListener('click', removeSelected);
+
+  // bind style inputs to selected layer
+  $text.addEventListener('input', () => {
+    if (selected < 0) return;
+    layers[selected].text = $text.value;
+    draw();
+  });
+  function bindStyle(el, key, parse) {
+    const handler = () => {
+      if (selected < 0) return;
+      layers[selected][key] = parse ? parse(el.value) : el.value;
+      draw();
+    };
+    el.addEventListener('input', handler);
+    el.addEventListener('change', handler);
+  }
+  bindStyle($size, 'size', (v) => +v || 48);
+  bindStyle($color, 'color');
+  bindStyle($stroke, 'stroke');
+  bindStyle($strokeW, 'strokeW', (v) => +v || 0);
+  bindStyle($font, 'font');
+
+  // grid controls
+  for (const el of [$cols, $gap]) {
+    el.addEventListener('input', () => relayout(true));
+    el.addEventListener('change', () => relayout(true));
+  }
+  $template.addEventListener('change', () => {
+    $cols.disabled = $template.value !== 'auto';
+    relayout(true);
+  });
+  $bg.addEventListener('input', draw);
+  $bg.addEventListener('change', draw);
+
+  // delete key removes selected layer when not typing in input
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { $dlMenu.hidden = true; $copyMenu.hidden = true; setSelected(-1); return; }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selected >= 0) {
+      const ae = document.activeElement;
+      const inField = ae && (ae.tagName === 'INPUT' || ae.tagName === 'SELECT' || ae.tagName === 'TEXTAREA');
+      if (!inField) { e.preventDefault(); removeSelected(); }
+    }
+  });
+
+  // ---------- export ----------
   const VARIANTS = [
     { label: 'Original',          mode: 'original' },
     { label: 'Fit 1024px',        mode: 'fit', size: 1024, sub: 'longest edge' },
@@ -263,46 +538,32 @@
   ];
 
   function renderToCanvas(opts) {
+    const native = composeNative();
+    if (opts.mode === 'original') return native;
+    const sw = native.width, sh = native.height;
     const off = document.createElement('canvas');
-    const sw = cv.width, sh = cv.height;
-    let dw, dh, ix, iy, iw, ih;
-    if (opts.mode === 'original') {
-      dw = sw; dh = sh; ix = 0; iy = 0; iw = sw; ih = sh;
-    } else if (opts.mode === 'fit') {
+    if (opts.mode === 'fit') {
       const N = opts.size;
+      let dw, dh;
       if (sw >= sh) { dw = N; dh = Math.max(1, Math.round(N * sh / sw)); }
       else          { dh = N; dw = Math.max(1, Math.round(N * sw / sh)); }
-      ix = 0; iy = 0; iw = dw; ih = dh;
+      off.width = dw; off.height = dh;
+      const oc = off.getContext('2d');
+      oc.imageSmoothingEnabled = true;
+      oc.imageSmoothingQuality = 'high';
+      oc.drawImage(native, 0, 0, dw, dh);
     } else if (opts.mode === 'square') {
       const N = opts.size;
-      dw = N; dh = N;
+      off.width = N; off.height = N;
+      const oc = off.getContext('2d');
+      oc.fillStyle = $bg.value;
+      oc.fillRect(0, 0, N, N);
+      let iw, ih, ix, iy;
       if (sw >= sh) { iw = N; ih = Math.round(N * sh / sw); ix = 0; iy = Math.round((N - ih) / 2); }
       else          { ih = N; iw = Math.round(N * sw / sh); iy = 0; ix = Math.round((N - iw) / 2); }
-    }
-    off.width = dw; off.height = dh;
-    const oc = off.getContext('2d');
-    oc.imageSmoothingEnabled = true;
-    oc.imageSmoothingQuality = 'high';
-    oc.drawImage(img, ix, iy, iw, ih);
-    const text = $text.value;
-    if (text) {
-      const scale = iw / sw;
-      const tx = ix + (posPx.x / sw) * iw;
-      const ty = iy + (posPx.y / sh) * ih;
-      const size = (+$size.value || 48) * scale;
-      const stroke = (+$strokeW.value || 0) * scale;
-      oc.font = `bold ${size}px "${$font.value}", sans-serif`;
-      oc.textAlign = 'center';
-      oc.textBaseline = 'middle';
-      oc.lineJoin = 'round';
-      oc.miterLimit = 2;
-      if (stroke > 0) {
-        oc.lineWidth = stroke * 2;
-        oc.strokeStyle = $stroke.value;
-        oc.strokeText(text, tx, ty);
-      }
-      oc.fillStyle = $color.value;
-      oc.fillText(text, tx, ty);
+      oc.imageSmoothingEnabled = true;
+      oc.imageSmoothingQuality = 'high';
+      oc.drawImage(native, ix, iy, iw, ih);
     }
     return off;
   }
@@ -315,7 +576,7 @@
     return v.mode === 'original' ? 'caption' : `caption-${v.mode === 'square' ? v.size + 'sq' : v.size}`;
   }
 
-  async function doDownload(v) {
+  function doDownload(v) {
     const canvas = renderToCanvas(v);
     canvas.toBlob((blob) => {
       const a = document.createElement('a');
@@ -359,21 +620,26 @@
   $dlCaret.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($dlMenu, [$copyMenu]); });
   $copyCaret.addEventListener('click', (e) => { e.stopPropagation(); toggleMenu($copyMenu, [$dlMenu]); });
   document.addEventListener('click', () => { $dlMenu.hidden = true; $copyMenu.hidden = true; });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { $dlMenu.hidden = true; $copyMenu.hidden = true; }
-  });
 
-  // main button = default action (Original)
-  $dl.addEventListener('click', () => { if (img) doDownload(VARIANTS[0]); });
-  $copy.addEventListener('click', () => { if (img) doCopy(VARIANTS[0], $copy); });
+  $dl.addEventListener('click', () => { if (images.length) doDownload(VARIANTS[0]); });
+  $copy.addEventListener('click', () => { if (images.length) doCopy(VARIANTS[0], $copy); });
 
   $reset.addEventListener('click', () => {
-    if (!img) return;
-    posPx = { x: cv.width / 2, y: cv.height * 0.9 };
-    draw();
+    images.length = 0;
+    layers.length = 0;
+    selected = -1;
+    syncControlsFromLayer();
+    enableButtons();
+    refreshTemplateOptions();
+    relayout(false);
   });
 
-  window.addEventListener('resize', () => { if (img) fitCanvasDisplay(); });
+  window.addEventListener('resize', () => { if (images.length) fitCanvasDisplay(); });
+
+  // initial state
+  enableButtons();
+  syncControlsFromLayer();
+  refreshTemplateOptions();
 })();
 </script>
 </body>
