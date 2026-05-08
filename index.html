@@ -35,14 +35,16 @@
   .menu {
     position: absolute; top: calc(100% + 4px); left: 0; z-index: 10;
     background: #1d1d22; border: 1px solid #2a2a2f; border-radius: 8px;
-    min-width: 200px; padding: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    min-width: 240px; padding: 4px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
   }
   .menu[hidden] { display: none; }
   .menu button {
-    display: flex; justify-content: space-between; gap: 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
     width: 100%; text-align: left; background: transparent; color: #eee;
     border: 0; padding: 7px 10px; border-radius: 4px; cursor: pointer; font: inherit;
+    white-space: nowrap;
   }
+  .menu button > span { white-space: nowrap; }
   .menu button:hover { background: #2a2a2f; }
   .menu .sub { color: #8b8b94; font-size: 12px; }
   .stage {
