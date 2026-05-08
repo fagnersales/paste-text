@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Paste &amp; Caption</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0e0e10; color: #eee; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .app { display: grid; grid-template-rows: auto 1fr; height: 100%; }
+  header {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px 12px; background: #17171a; border-bottom: 1px solid #2a2a2f;
+  }
+  header input[type="text"], header input[type="number"], header select, header input[type="color"] {
+    background: #0e0e10; color: #eee; border: 1px solid #2a2a2f; border-radius: 6px;
+    padding: 6px 8px; font: inherit;
+  }
+  header input[type="text"] { min-width: 240px; flex: 1 1 240px; }
+  header label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #bdbdc4; }
+  header button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 6px; padding: 7px 12px;
+    cursor: pointer; font: inherit;
+  }
+  header button.ghost { background: #2a2a2f; }
+  header button:disabled { opacity: .5; cursor: not-allowed; }
+  .stage {
+    position: relative; overflow: auto; padding: 24px;
+    background:
+      linear-gradient(45deg, #15151a 25%, transparent 25%) 0 0/20px 20px,
+      linear-gradient(-45deg, #15151a 25%, transparent 25%) 0 10px/20px 20px,
+      #1b1b20;
+  }
+  .canvas-wrap {
+    position: relative; display: inline-block; margin: 0 auto;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+  canvas { display: block; max-width: 100%; height: auto; background: #000; }
+  .hint {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: #9b9ba3; pointer-events: none; font-size: 14px;
+  }
+  .hint kbd {
+    background: #2a2a2f; border: 1px solid #3a3a42; border-bottom-width: 2px;
+    padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, monospace;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <input id="text" type="text" placeholder="Type caption here…" />
+    <label>Size <input id="size" type="number" min="8" max="400" value="48" style="width:72px" /></label>
+    <label>Color <input id="color" type="color" value="#ffffff" /></label>
+    <label>Stroke <input id="stroke" type="color" value="#000000" /></label>
+    <label>Stroke px <input id="strokeW" type="number" min="0" max="40" value="3" style="width:64px" /></label>
+    <label>Font
+      <select id="font">
+        <option>Impact</option>
+        <option>Arial Black</option>
+        <option>Helvetica</option>
+        <option>Georgia</option>
+        <option>Comic Sans MS</option>
+        <option>Courier New</option>
+      </select>
+    </label>
+    <button id="copy" disabled>Copy Image</button>
+    <button id="download" disabled>Download PNG</button>
+    <button id="reset" class="ghost" disabled>Reset</button>
+  </header>
+  <div class="stage" id="stage">
+    <div class="canvas-wrap" id="wrap">
+      <canvas id="cv" width="900" height="500"></canvas>
+      <div class="hint" id="hint">Press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste an image</div>
+    </div>
+  </div>
+</div>
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const hint = document.getElementById('hint');
+  const wrap = document.getElementById('wrap');
+  const $text = document.getElementById('text');
+  const $size = document.getElementById('size');
+  const $color = document.getElementById('color');
+  const $stroke = document.getElementById('stroke');
+  const $strokeW = document.getElementById('strokeW');
+  const $font = document.getElementById('font');
+  const $dl = document.getElementById('download');
+  const $copy = document.getElementById('copy');
+  const $reset = document.getElementById('reset');
+
+  let img = null;
+  // text position in image-pixel coords (center of text)
+  let pos = { x: 0.5, y: 0.9 }; // normalized 0..1 until image set; replaced with px after
+  let posPx = null;
+  let dragging = false;
+  let dragOff = { x: 0, y: 0 };
+
+  function setImage(image) {
+    img = image;
+    cv.width = image.naturalWidth;
+    cv.height = image.naturalHeight;
+    // place text centered near bottom by default
+    posPx = { x: cv.width / 2, y: cv.height * 0.9 };
+    hint.style.display = 'none';
+    $dl.disabled = false;
+    $copy.disabled = false;
+    $reset.disabled = false;
+    fitCanvasDisplay();
+    draw();
+  }
+
+  function fitCanvasDisplay() {
+    // limit displayed width to viewport
+    const maxW = wrap.parentElement.clientWidth - 48;
+    const maxH = wrap.parentElement.clientHeight - 48;
+    const ratio = cv.width / cv.height;
+    let w = cv.width, h = cv.height;
+    if (w > maxW) { w = maxW; h = w / ratio; }
+    if (h > maxH) { h = maxH; w = h * ratio; }
+    cv.style.width = w + 'px';
+    cv.style.height = h + 'px';
+  }
+
+  function draw() {
+    if (!img) {
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      return;
+    }
+    ctx.drawImage(img, 0, 0);
+    const text = $text.value;
+    if (!text) return;
+    const size = +$size.value || 48;
+    const font = $font.value;
+    ctx.font = `bold ${size}px "${font}", sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    const sw = +$strokeW.value || 0;
+    if (sw > 0) {
+      ctx.lineWidth = sw * 2;
+      ctx.strokeStyle = $stroke.value;
+      ctx.strokeText(text, posPx.x, posPx.y);
+    }
+    ctx.fillStyle = $color.value;
+    ctx.fillText(text, posPx.x, posPx.y);
+  }
+
+  // paste handler
+  window.addEventListener('paste', async (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const it of items) {
+      if (it.type.startsWith('image/')) {
+        const file = it.getAsFile();
+        if (!file) continue;
+        const url = URL.createObjectURL(file);
+        const im = new Image();
+        im.onload = () => { setImage(im); URL.revokeObjectURL(url); };
+        im.src = url;
+        e.preventDefault();
+        return;
+      }
+    }
+  });
+
+  // also accept drag-drop
+  window.addEventListener('dragover', (e) => { e.preventDefault(); });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !file.type.startsWith('image/')) return;
+    const url = URL.createObjectURL(file);
+    const im = new Image();
+    im.onload = () => { setImage(im); URL.revokeObjectURL(url); };
+    im.src = url;
+  });
+
+  // mapping screen -> canvas pixels
+  function toCanvasCoords(clientX, clientY) {
+    const r = cv.getBoundingClientRect();
+    const x = (clientX - r.left) * (cv.width / r.width);
+    const y = (clientY - r.top) * (cv.height / r.height);
+    return { x, y };
+  }
+
+  cv.addEventListener('pointerdown', (e) => {
+    if (!img) return;
+    cv.setPointerCapture(e.pointerId);
+    const p = toCanvasCoords(e.clientX, e.clientY);
+    dragOff.x = posPx.x - p.x;
+    dragOff.y = posPx.y - p.y;
+    dragging = true;
+  });
+  cv.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const p = toCanvasCoords(e.clientX, e.clientY);
+    posPx.x = p.x + dragOff.x;
+    posPx.y = p.y + dragOff.y;
+    draw();
+  });
+  const endDrag = (e) => { dragging = false; try { cv.releasePointerCapture(e.pointerId); } catch {} };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
+
+  cv.style.cursor = 'move';
+
+  // controls
+  for (const el of [$text, $size, $color, $stroke, $strokeW, $font]) {
+    el.addEventListener('input', draw);
+    el.addEventListener('change', draw);
+  }
+
+  $dl.addEventListener('click', () => {
+    if (!img) return;
+    cv.toBlob((blob) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'caption.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }, 'image/png');
+  });
+
+  $copy.addEventListener('click', async () => {
+    if (!img) return;
+    const orig = $copy.textContent;
+    try {
+      const blob = await new Promise((res) => cv.toBlob(res, 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      $copy.textContent = 'Copied!';
+    } catch (err) {
+      console.error(err);
+      $copy.textContent = 'Copy failed';
+    }
+    setTimeout(() => { $copy.textContent = orig; }, 1200);
+  });
+
+  $reset.addEventListener('click', () => {
+    if (!img) return;
+    posPx = { x: cv.width / 2, y: cv.height * 0.9 };
+    draw();
+  });
+
+  window.addEventListener('resize', () => { if (img) fitCanvasDisplay(); });
+})();
+</script>
+</body>
+</html>
